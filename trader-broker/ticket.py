@@ -36,6 +36,7 @@ New York dates; --now "2026-10-19 10:15" pins the clock.
 import argparse
 import datetime
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -57,6 +58,43 @@ DOUBT_WORDS = {"no", "not", "dont", "don't", "wait", "cancel", "stop", "but", "m
 
 class TicketError(Exception):
     pass
+
+
+# The Time Machine note on a ticket is informational and is NOT part of the order. It comes
+# from trader-budget's size.py (the sibling skill folder), the same function the budget
+# summary uses, so the two cannot disagree. If that file is missing the ticket says the
+# result is unavailable; it never decides anything and never touches the order or the gates.
+TM_UNAVAILABLE = "Time Machine result unavailable or stale."
+_BUDGET = []
+
+
+def _budget():
+    """trader-budget/size.py loaded from the folder next to this skill, or None."""
+    if not _BUDGET:
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "trader-budget", "size.py")
+        mod = None
+        try:
+            spec = importlib.util.spec_from_file_location("trader_budget_size", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+        except Exception:
+            mod = None
+        _BUDGET.append(mod)
+    return _BUDGET[0]
+
+
+def time_machine_for(order, rv, plan, doc, today):
+    """(status, lines) for an entry ticket, else None (an exit ticket gets no note)."""
+    if str(order.get("side", "")).lower() != "buy" or kind_of(order, rv) != "entry":
+        return None
+    try:
+        mod = _budget()
+        if mod is None:
+            return "unavailable", [TM_UNAVAILABLE]
+        return mod.time_machine_for_order(order, plan, doc, today)
+    except Exception:
+        return "unavailable", [TM_UNAVAILABLE]
 
 
 # ---------------------------------------------------------------- time (New York, no tz files)
@@ -349,7 +387,7 @@ def kind_of(order, rv):
 
 # ---------------------------------------------------------------- rendering
 
-def render(order, idx, total, cfg, risk, state, today):
+def render(order, idx, total, cfg, risk, state, today, tm=None):
     ready, label, rv = status_of(order, risk, state, today)
     broker = str(cfg.get("broker", "alpaca")).lower()
     paper = cfg.get("paper", True)
@@ -362,6 +400,9 @@ def render(order, idx, total, cfg, risk, state, today):
     lines.append("  " + label)
     for w in (rv or {}).get("warnings", []):
         lines.append("  note: " + w)
+    if tm:
+        for l in tm[1]:
+            lines.append("  " + l)
     if broker == "ibkr":
         lines.append("  Claude drafts this with the Interactive Brokers connector. IBKR sends it to your")
         lines.append("  IBKR account, and it only goes to the market after you approve it there.")
@@ -379,14 +420,17 @@ def render(order, idx, total, cfg, risk, state, today):
     return "\n".join(lines), ready
 
 
-def ticket_json(order, idx, cfg, risk, state, today):
+def ticket_json(order, idx, cfg, risk, state, today, tm=None):
     ready, label, rv = status_of(order, risk, state, today)
     loss, stop = max_loss(order)
-    return {"index": idx, "ready": ready, "status": label, "plain": plain(order),
+    out = {"index": idx, "ready": ready, "status": label, "plain": plain(order),
             "fingerprint": fingerprint(order), "paper": bool(cfg.get("paper", True)),
             "broker": cfg.get("broker", "alpaca"), "tool": "place_stock_order",
             "tool_input": tool_input(order), "why": order.get("why", ""),
             "bracket": is_bracket(order), "max_loss": loss, "stop": stop}
+    if tm:
+        out["time_machine"] = {"status": tm[0], "message": " ".join(l.strip() for l in tm[1])}
+    return out
 
 
 # ---------------------------------------------------------------- fills -> portfolio
@@ -479,16 +523,29 @@ def _pick(orders, index):
     return orders[index - 1]
 
 
+def _soft_json(path):
+    """A file the note reads, or None if it is missing or broken: the note never stops a ticket."""
+    try:
+        return read_json(path, "file", required=False)
+    except TicketError:
+        return None
+
+
 def cmd_show(a):
     orders, cfg, risk, state, today, now = _load(a)
     picks = [(a.index, _pick(orders, a.index))] if a.index else list(enumerate(orders, 1))
+    plan, doc = _soft_json(a.plan), _soft_json(a.timemachine)
+
+    def note(o):
+        return time_machine_for(o, status_of(o, risk, state, today)[2], plan, doc, today)
+
     if a.json:
-        out = [ticket_json(o, i, cfg, risk, state, today) for i, o in picks]
+        out = [ticket_json(o, i, cfg, risk, state, today, note(o)) for i, o in picks]
         print(json.dumps(out[0] if a.index else out, indent=2))
         return 0 if any(t["ready"] for t in out) else 1
     blocks, any_ready = [], False
     for i, o in picks:
-        text, ready = render(o, i, len(orders), cfg, risk, state, today)
+        text, ready = render(o, i, len(orders), cfg, risk, state, today, note(o))
         blocks.append(text)
         any_ready = any_ready or ready
     print("\n\n".join(blocks))
@@ -665,6 +722,8 @@ def main(argv=None):
     common(p)
     p.add_argument("--index", type=int)
     p.add_argument("--json", action="store_true")
+    p.add_argument("--plan", default="trader/plan.json", help="for the Time Machine note")
+    p.add_argument("--timemachine", default="trader/timemachine.json", help="for the Time Machine note")
     p = sub.add_parser("approve", help="record the user's explicit yes for one order")
     common(p)
     p.add_argument("--index", type=int, required=True)

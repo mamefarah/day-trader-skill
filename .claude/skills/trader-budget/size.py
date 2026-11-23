@@ -494,6 +494,46 @@ def time_machine_note(plan, doc, today):
     return "ok", ["Time Machine (this exact plan): %s." % odds]
 
 
+def read_time_machine(path):
+    """The saved trader-timemachine run, or None when it is missing or unreadable. The note
+    is informational, so a bad file never stops anything."""
+    try:
+        if not path or not os.path.exists(path):
+            return None
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return None
+
+
+def order_is_for_plan(order, plan):
+    """True when a proposed buy order is the bracket sized from this plan: same symbol, same
+    stop-loss and take-profit. The saved Time Machine run is about the plan, so an order that
+    is not from it (the plan was redone after the order was written) gets no result."""
+    try:
+        if not isinstance(order, dict) or not isinstance(plan, dict):
+            return False
+        if str(order.get("symbol") or "").upper() != str(plan.get("symbol") or "").upper():
+            return False
+        pairs = ((order.get("stop_loss_stop_price"), plan.get("stop")),
+                 (order.get("take_profit_limit_price"), plan.get("target")))
+        for a, b in pairs:
+            a, b = _f(a), _f(b)
+            if a is None or b is None or round_cent(a) != round_cent(b):
+                return False
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+def time_machine_for_order(order, plan, doc, today):
+    """(status, lines) for the order ticket: the same note the budget summary prints, once the
+    order is tied to the plan. This is the one function both skills call."""
+    if not order_is_for_plan(order, plan):
+        return "unavailable", [TM_UNAVAILABLE]
+    return time_machine_note(plan, doc, today)
+
+
 def plan_report(s, order, notes=(), tm_lines=()):
     lines = []
     setup = SETUP_WORDS.get(s["setup"], s["setup"] or "setup")
@@ -866,13 +906,7 @@ def run_plan(a, cfg):
         write_orders(a.write, [order], cfg, src, now)
     tm_status, tm_lines = "unavailable", [TM_UNAVAILABLE]
     if order:
-        tm_doc = None
-        if os.path.exists(a.timemachine):
-            try:
-                tm_doc = read_json(a.timemachine, "time machine")
-            except SizeError:
-                tm_doc = None
-        tm_status, tm_lines = time_machine_note(plan, tm_doc, today)
+        tm_status, tm_lines = time_machine_note(plan, read_time_machine(a.timemachine), today)
     if a.json:
         print(json.dumps({"sizing": s, "orders": [order] if order else [], "notes": notes,
                           "time_machine": {"status": tm_status, "message": " ".join(
