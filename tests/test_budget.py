@@ -549,3 +549,57 @@ def shutil_copy(src, dst):
 def dump(path, doc):
     with open(path, "w") as fh:
         json.dump(doc, fh)
+
+
+class OrderIsForPlan(unittest.TestCase):
+    def setUp(self):
+        with open(os.path.join(FIX, "trader-risk", "orders-tsla.json")) as fh:
+            self.order = json.load(fh)["orders"][0]
+        self.plan = plan()
+
+    def ok(self, order=None, pl=None):
+        return size.order_is_for_plan(order if order is not None else self.order,
+                                      pl if pl is not None else self.plan)
+
+    def test_the_bracket_sized_from_the_plan_matches(self):
+        self.assertTrue(self.ok())
+        self.assertTrue(self.ok(dict(self.order, symbol="tsla")))                  # case does not matter
+
+    def test_any_one_field_different_breaks_the_match(self):
+        changes = {
+            "symbol": lambda o, p: o.update(symbol="NVDA"),
+            "side": lambda o, p: o.update(side="sell"),
+            "order stop": lambda o, p: o.update(stop_loss_stop_price="358.00"),
+            "order target": lambda o, p: o.update(take_profit_limit_price="371.00"),
+            "embedded stop": lambda o, p: o["plan"].update(stop=358.00),
+            "embedded target": lambda o, p: o["plan"].update(target=371.00),
+            "entry (embedded)": lambda o, p: o["plan"].update(entry=365.00),
+            "entry (plan)": lambda o, p: p.update(entry=365.00),
+            "setup": lambda o, p: o["plan"].update(setup="flag"),
+            "entry time": lambda o, p: o["plan"].update(entry_time="10:20 AM"),
+            "plan stop": lambda o, p: p.update(stop=358.00),
+            "plan target": lambda o, p: p.update(target=371.00),
+            "no embedded plan": lambda o, p: o.pop("plan"),
+            "embedded plan not a dict": lambda o, p: o.update(plan="x"),
+            "no plan symbol": lambda o, p: p.pop("symbol"),
+        }
+        for name, change in changes.items():
+            order = json.loads(json.dumps(self.order))
+            pl = dict(self.plan)
+            change(order, pl)
+            self.assertFalse(size.order_is_for_plan(order, pl), name)
+
+    def test_bad_inputs_are_false_not_errors(self):
+        for o, p in ((None, self.plan), (self.order, None), ("x", "y"), ({}, {}),
+                     (dict(self.order, stop_loss_stop_price="abc"), self.plan)):
+            self.assertFalse(size.order_is_for_plan(o, p))
+
+    def test_cent_rounding_not_float_noise(self):
+        order = json.loads(json.dumps(self.order))
+        order["plan"]["entry"] = 364.1800000001
+        self.assertTrue(self.ok(order))
+
+    def test_the_budget_own_order_always_matches_its_plan(self):
+        # what size.py writes must pass its own check, or the ticket would never show a result
+        s = size.size_trade(self.plan, cfg(), None, None, None, None, TODAY)
+        self.assertTrue(self.ok(size.bracket_order(s)))

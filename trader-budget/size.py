@@ -507,19 +507,33 @@ def read_time_machine(path):
 
 
 def order_is_for_plan(order, plan):
-    """True when a proposed buy order is the bracket sized from this plan: same symbol, same
-    stop-loss and take-profit. The saved Time Machine run is about the plan, so an order that
-    is not from it (the plan was redone after the order was written) gets no result."""
+    """True when a proposed buy order is the bracket sized from this exact plan. The saved
+    Time Machine run is about the plan, so an order that is not from it (the plan was redone
+    after the order was written) gets no result. Compared, all of them: the symbol; the
+    stop-loss and take-profit on the order AND the stop and target in its embedded plan; and
+    the embedded plan's entry (the price the order was sized at: the plan's entry unless a
+    fresher price or a limit moved it, which is a different trade from the one replayed),
+    setup and entry time. An order with no embedded plan cannot be verified, so it is False."""
     try:
         if not isinstance(order, dict) or not isinstance(plan, dict):
             return False
-        if str(order.get("symbol") or "").upper() != str(plan.get("symbol") or "").upper():
+        emb = order.get("plan")
+        if not isinstance(emb, dict):
             return False
-        pairs = ((order.get("stop_loss_stop_price"), plan.get("stop")),
-                 (order.get("take_profit_limit_price"), plan.get("target")))
-        for a, b in pairs:
+        if not plan.get("symbol") or str(order.get("symbol") or "").upper() != str(plan["symbol"]).upper():
+            return False
+        if str(order.get("side") or "").lower() != "buy":
+            return False
+        for a, b in ((order.get("stop_loss_stop_price"), plan.get("stop")),
+                     (order.get("take_profit_limit_price"), plan.get("target")),
+                     (emb.get("stop"), plan.get("stop")),
+                     (emb.get("target"), plan.get("target")),
+                     (emb.get("entry"), plan.get("entry"))):
             a, b = _f(a), _f(b)
             if a is None or b is None or round_cent(a) != round_cent(b):
+                return False
+        for k in ("setup", "entry_time"):
+            if str(emb.get(k) or "") != str(plan.get(k) or ""):
                 return False
         return True
     except (TypeError, ValueError):

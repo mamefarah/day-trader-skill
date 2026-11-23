@@ -145,7 +145,9 @@ that draft orders to Needs approval too.
    the order, not a gate, and it never changes whether a yes is accepted.
    `TIME MACHINE WARNING (not a block)` means trader-timemachine's saved
    run for this exact plan leans toward the stop; `Time Machine result
-   unavailable or stale.` means there is no run for this exact plan, today.
+   unavailable or stale.` means there is no run for this exact plan, today, or the
+   order on the ticket is not the one sized from that plan (symbol, entry,
+   setup, entry time, stop and target must all match).
    An exit ticket (a sell that closes a position) carries no such line.
    The text comes from trader-budget's `size.py`, the same function its own
    summary uses, so the two cannot disagree (`show` reads `trader/plan.json`

@@ -110,8 +110,11 @@ Otherwise, or when the file is missing or unreadable, the line is
 `Time Machine result unavailable or stale.` When it matches and the replays
 lean toward the stop (the Time Machine's own "Leans toward the stop" or worse),
 the line is labelled `TIME MACHINE WARNING (not a block)` and gives the
-simulated and historical average R. `--timemachine PATH` reads another file;
-`--json` carries the same text under `time_machine`.
+simulated and historical average R. On the trader-broker ticket the order
+must also be the one sized from this plan (symbol, entry, setup, entry time,
+stop and target all equal the plan's; the entry is the price it was sized at),
+or the line is the unavailable message. `--timemachine PATH` reads another
+file; `--json` carries the same text under `time_machine`.
 
 ## Example: the reel
 
