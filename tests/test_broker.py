@@ -305,3 +305,262 @@ class Flow(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- the Time Machine note on the ticket
+
+import importlib.util
+
+size = load("trader-budget", "size")
+PLAN_MADE = "2026-10-19T14:15:00Z"
+TM_MADE = "2026-10-19T14:15:30Z"
+TM_POOR = {"p_target": 0.002, "p_stop": 0.138, "r_at_target": 1.0, "avg_R": -0.065}
+TM_FINE = {"p_target": 0.20, "p_stop": 0.15, "r_at_target": 1.0, "avg_R": 0.12}
+
+
+def _read(path):
+    with open(path) as fh:
+        return fh.read()
+
+
+def _dump(path, doc):
+    with open(path, "w") as fh:
+        json.dump(doc, fh)
+
+
+def _tm_doc(plan, mc=TM_POOR, made=TM_MADE, **over):
+    saved = {k: plan.get(k) for k in size.TM_PLAN_KEYS}
+    saved.update(over)
+    return {"created_by": "trader-timemachine", "created_at": made, "plan": saved, "mc": dict(mc),
+            "history": {"triggered": 34, "avg_R": -0.269}}
+
+
+class TicketTimeMachine(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        j = lambda n: os.path.join(self.d, n)
+        self.orders, self.cfg, self.plan_p, self.tm_p = j("orders.json"), j("config.json"), j("plan.json"), j("tm.json")
+        self.risk, self.state, self.pf, self.none = j("state/risk.json"), j("state/broker.json"), j("pf.json"), j("none")
+        shutil.copy(ORDERS_PATH, self.orders)
+        shutil.copy(CFG_PATH, self.cfg)
+        with open(PLAN_PATH) as fh:
+            self.plan = json.load(fh)
+        self.plan["created_at"] = PLAN_MADE
+        _dump(self.plan_p, self.plan)
+        with redirect_stdout(io.StringIO()):
+            check.main(["--orders", self.orders, "--config", self.cfg, "--portfolio", self.pf, "--prices",
+                        self.none, "--state", self.state, "--now", NOW, "--out", self.risk])
+
+    def tearDown(self):
+        shutil.rmtree(self.d)
+
+    def show(self, *extra):
+        return run(["show", "--orders", self.orders, "--config", self.cfg, "--risk", self.risk,
+                    "--state", self.state, "--plan", self.plan_p, "--timemachine", self.tm_p,
+                    "--now", NOW] + list(extra))
+
+    def test_a_matching_poor_result_warns_on_the_ticket(self):
+        _dump(self.tm_p, _tm_doc(self.plan))
+        code, text, _ = self.show("--index", "1")
+        self.assertEqual(code, 0)
+        self.assertIn("  TIME MACHINE WARNING (not a block): the replay of this exact plan leans toward the "
+                      "stop: target first 0.2 % vs stop first 13.8 %; simulated average -0.065R; "
+                      "historical average -0.269R over 34 past sessions.", text)
+        self.assertIn("READY: trader-risk PASS, waiting for your yes", text)
+        self.assertIn("Reply \"yes\" to place this one order", text)
+        self.assertLess(text.index("READY:"), text.index("TIME MACHINE WARNING"))
+        self.assertLess(text.index("TIME MACHINE WARNING"), text.index("Claude will call place_stock_order"))
+        self.assertNotIn("unavailable or stale", text)
+
+    def test_a_matching_fair_result_is_only_informational(self):
+        _dump(self.tm_p, _tm_doc(self.plan, TM_FINE))
+        code, text, _ = self.show("--index", "1")
+        self.assertEqual(code, 0)
+        self.assertIn("  Time Machine (this exact plan): target first 20.0 % vs stop first 15.0 %", text)
+        self.assertNotIn("WARNING", text)
+
+    def test_stale_or_missing_results_say_unavailable_and_never_warn(self):
+        stale = {
+            "other stop": lambda: _dump(self.tm_p, _tm_doc(self.plan, stop=358.00)),
+            "other symbol": lambda: _dump(self.tm_p, _tm_doc(self.plan, symbol="NVDA")),
+            "other date": lambda: _dump(self.tm_p, _tm_doc(self.plan, date="2026-10-16")),
+            "older than the plan": lambda: _dump(self.tm_p, _tm_doc(self.plan, made="2026-10-19T14:00:00Z")),
+            "broken json": lambda: open(self.tm_p, "w").close(),
+            "not a dict": lambda: _dump(self.tm_p, [1, 2]),
+            "no file": lambda: os.path.exists(self.tm_p) and os.remove(self.tm_p),
+        }
+        for name, make in stale.items():
+            make()
+            code, text, _ = self.show("--index", "1")
+            self.assertEqual(code, 0, name)
+            self.assertIn("  Time Machine result unavailable or stale.", text, name)
+            self.assertNotIn("WARNING", text, name)
+            self.assertIn("READY: trader-risk PASS", text, name)
+
+    def test_an_order_that_is_not_from_the_current_plan_gets_no_result(self):
+        # the plan was redone with a new stop and the Time Machine re-run for it, but the order
+        # on the table is still the old bracket: the result is about a different trade
+        newer = dict(self.plan, stop=359.00, risk_per_share=5.18)
+        _dump(self.plan_p, newer)
+        _dump(self.tm_p, _tm_doc(newer))
+        code, text, _ = self.show("--index", "1")
+        self.assertIn("Time Machine result unavailable or stale.", text)
+        self.assertNotIn("WARNING", text)
+
+    def test_the_ticket_and_the_budget_summary_cannot_disagree(self):
+        cases = [("poor", lambda: _dump(self.tm_p, _tm_doc(self.plan))),
+                 ("fair", lambda: _dump(self.tm_p, _tm_doc(self.plan, TM_FINE))),
+                 ("stale", lambda: _dump(self.tm_p, _tm_doc(self.plan, stop=358.00))),
+                 ("missing", lambda: os.path.exists(self.tm_p) and os.remove(self.tm_p))]
+        for name, make in cases:
+            make()
+            _, ticket_text, _ = self.show("--index", "1")
+            out = io.StringIO()
+            with redirect_stdout(out), redirect_stderr(io.StringIO()):
+                size.main(["--plan", self.plan_p, "--config", self.cfg, "--portfolio", self.none,
+                           "--timemachine", self.tm_p, "--now", NOW])
+            budget_text = out.getvalue()
+            tm_lines = [l for l in budget_text.splitlines()
+                        if l.strip().startswith(("TIME MACHINE", "Time Machine", "trader-risk checks your rules"))]
+            self.assertTrue(tm_lines, name)
+            for l in tm_lines:
+                self.assertIn("  " + l.strip() + "\n", ticket_text, name)
+
+    def test_the_ticket_calls_the_budget_function_and_has_no_rules_of_its_own(self):
+        mod = ticket._budget()
+        self.assertEqual(os.path.basename(os.path.dirname(mod.__file__)), "trader-budget")
+        self.assertEqual(ticket.TM_UNAVAILABLE, size.TM_UNAVAILABLE)
+        with open(os.path.join(ROOT, "trader-broker", "ticket.py")) as fh:
+            src = fh.read()
+        for word in ("TM_POOR_GAP", "p_stop", "p_target", "avg_R", "COIN_FLIP"):
+            self.assertNotIn(word, src)
+
+    def test_budget_missing_means_unavailable_not_a_crash(self):
+        saved = list(ticket._BUDGET)
+        ticket._BUDGET[:] = [None]
+        try:
+            _dump(self.tm_p, _tm_doc(self.plan))
+            code, text, _ = self.show("--index", "1")
+            self.assertEqual(code, 0)
+            self.assertIn("  Time Machine result unavailable or stale.", text)
+            self.assertNotIn("WARNING", text)
+        finally:
+            ticket._BUDGET[:] = saved
+
+    def test_exit_tickets_carry_no_note(self):
+        _dump(self.tm_p, _tm_doc(self.plan))
+        sell = {"symbol": "TSLA", "side": "sell", "qty": "8", "type": "market", "time_in_force": "day"}
+        for rv in (None, {"kind": "exit"}):
+            self.assertIsNone(ticket.time_machine_for(sell, rv, self.plan, _tm_doc(self.plan), TODAY))
+        buy = tsla()
+        self.assertEqual(ticket.time_machine_for(buy, {"kind": "entry"}, self.plan,
+                                                 _tm_doc(self.plan), TODAY)[0], "warning")
+
+    def test_json_carries_the_note_and_nothing_else_changes(self):
+        _dump(self.tm_p, _tm_doc(self.plan))
+        _, with_text, _ = self.show("--index", "1", "--json")
+        os.remove(self.tm_p)
+        _, without_text, _ = self.show("--index", "1", "--json")
+        a, b = json.loads(with_text), json.loads(without_text)
+        self.assertEqual(a["time_machine"]["status"], "warning")
+        self.assertIn("TIME MACHINE WARNING (not a block)", a["time_machine"]["message"])
+        self.assertEqual(b["time_machine"]["status"], "unavailable")
+        a.pop("time_machine"), b.pop("time_machine")
+        self.assertEqual(a, b)   # fingerprint, status, tool_input, max loss: all identical
+
+    def test_the_approval_gate_and_order_data_do_not_change(self):
+        records = []
+        for with_tm in (True, False):
+            if with_tm:
+                _dump(self.tm_p, _tm_doc(self.plan))
+            elif os.path.exists(self.tm_p):
+                os.remove(self.tm_p)
+            if os.path.exists(self.state):
+                os.remove(self.state)
+            before = _read(self.orders)
+            risk_before = _read(self.risk)
+            args = ["--orders", self.orders, "--config", self.cfg, "--risk", self.risk, "--state", self.state,
+                    "--now", NOW]
+            code, text, _ = run(["approve", "--index", "1", "--reply", "sure"] + args)
+            self.assertEqual(code, 1)                      # still not a yes, with or without a warning
+            self.assertIn("Not recorded", text)
+            code, text, _ = run(["approve", "--index", "1", "--reply", "yes"] + args)
+            self.assertEqual(code, 0)                      # a plain yes is still accepted: it is not a gate
+            with open(self.state) as fh:
+                records.append(json.load(fh)["orders"])
+            self.assertEqual(_read(self.orders), before)
+            self.assertEqual(_read(self.risk), risk_before)
+        self.assertEqual(records[0], records[1])
+
+    def test_the_cloud_copy_says_the_same(self):
+        path = os.path.join(ROOT, ".claude", "skills", "trader-broker", "ticket.py")
+        spec = importlib.util.spec_from_file_location("trader_cloud_ticket", path)
+        cloud = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cloud)
+        self.assertIn(os.path.join(".claude", "skills", "trader-budget"), cloud._budget().__file__)
+        for doc in (_tm_doc(self.plan), _tm_doc(self.plan, TM_FINE), _tm_doc(self.plan, stop=1.0), None):
+            self.assertEqual(cloud.time_machine_for(tsla(), None, self.plan, doc, TODAY),
+                             ticket.time_machine_for(tsla(), None, self.plan, doc, TODAY))
+
+    # -- the order must be the one sized from the current plan: entry, setup and entry time too
+
+    def _rewrite_order(self, **plan_over):
+        """The orders file with the embedded plan changed. The embedded plan is not an Alpaca field,
+        so the fingerprint and the risk verdict stay valid: only the note may notice."""
+        with open(self.orders) as fh:
+            doc = json.load(fh)
+        doc["orders"][0]["plan"].update(plan_over)
+        _dump(self.orders, doc)
+
+    def test_an_old_order_with_a_different_entry_gets_no_result(self):
+        # the plan was redone with a different entry (same symbol, stop and target) and the Time
+        # Machine re-run for it; the order on the table is still the one sized at 364.18
+        newer = dict(self.plan, entry=365.00)
+        self.assertEqual((newer["symbol"], newer["stop"], newer["target"]),
+                         (tsla()["symbol"], 358.32, 370.04))
+        _dump(self.plan_p, newer)
+        _dump(self.tm_p, _tm_doc(newer))
+        code, text, _ = self.show("--index", "1")
+        self.assertEqual(code, 0)
+        self.assertIn("  Time Machine result unavailable or stale.", text)
+        self.assertNotIn("WARNING", text)
+        self.assertNotIn("Time Machine (this exact plan)", text)
+        # advisory only: the ticket is exactly as ready as before
+        self.assertIn("READY: trader-risk PASS, waiting for your yes", text)
+        self.assertIn("Reply \"yes\" to place this one order", text)
+
+    def test_other_embedded_plan_fields_that_differ_get_no_result(self):
+        _dump(self.tm_p, _tm_doc(self.plan))
+        for name, over in {"entry": {"entry": 365.00}, "setup": {"setup": "flag"},
+                           "entry time": {"entry_time": "10:20 AM"},
+                           "embedded stop": {"stop": 357.00}, "embedded target": {"target": 372.00}}.items():
+            shutil.copy(ORDERS_PATH, self.orders)
+            self._rewrite_order(**over)
+            code, text, _ = self.show("--index", "1")
+            self.assertEqual(code, 0, name)
+            self.assertIn("  Time Machine result unavailable or stale.", text, name)
+            self.assertNotIn("WARNING", text, name)
+            self.assertIn("READY: trader-risk PASS", text, name)
+
+    def test_an_order_with_no_embedded_plan_cannot_be_verified(self):
+        _dump(self.tm_p, _tm_doc(self.plan))
+        with open(self.orders) as fh:
+            doc = json.load(fh)
+        del doc["orders"][0]["plan"]
+        _dump(self.orders, doc)
+        _, text, _ = self.show("--index", "1")
+        self.assertIn("  Time Machine result unavailable or stale.", text)
+        self.assertNotIn("WARNING", text)
+
+    def test_the_unchanged_order_still_gets_the_warning(self):
+        _dump(self.tm_p, _tm_doc(self.plan))
+        _, text, _ = self.show("--index", "1")
+        self.assertIn("TIME MACHINE WARNING (not a block)", text)
+
+    def test_the_changed_embedded_plan_does_not_touch_the_gates(self):
+        _, before, _ = self.show("--index", "1", "--json")
+        self._rewrite_order(entry=365.00)
+        _, after, _ = self.show("--index", "1", "--json")
+        a, b = json.loads(before), json.loads(after)
+        for k in ("fingerprint", "ready", "status", "tool_input", "max_loss", "stop"):
+            self.assertEqual(a[k], b[k], k)

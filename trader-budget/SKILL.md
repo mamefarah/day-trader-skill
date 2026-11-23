@@ -45,6 +45,7 @@ another day is refused: make a new one with trader-exit.
 | `trader/plan.json` | the trade: entry, stop, target, setup, flat-by time (trader-exit writes it) |
 | `trader/prices.json` | optional: a fresh price above the plan's entry means a bigger risk (trader-alerts writes it) |
 | `trader/portfolio.json` | optional: its cash caps the size (trader-broker keeps it) |
+| `trader/timemachine.json` | optional: trader-timemachine's saved run (`run --write`), read only for the note below |
 | `trader/orders.json` | the one proposed bracket order it writes with `--write` |
 
 ## Step 1: set the rules once
@@ -96,6 +97,24 @@ Show the four limits, which one decided the size, the shares, the dollars
 and the max loss at the stop. Say plainly that a stop is an order, not a
 promise: in a fast market it can fill below the stop. Then hand over to
 `/trader-risk`.
+
+### The Time Machine note
+
+Under the proposed order the summary adds one line from `trader/timemachine.json`,
+and it never blocks anything (trader-risk does not read it; its PASS stays a
+rules check). The saved run counts only when it was made for this exact plan:
+every plan field it repeats (symbol, date, side, setup, entry, entry time and
+bar, stop, target, risk, R, opening range, stop rule, interval, flat-by) equals
+`trader/plan.json`, the date is today's, and the run is not older than the plan.
+Otherwise, or when the file is missing or unreadable, the line is
+`Time Machine result unavailable or stale.` When it matches and the replays
+lean toward the stop (the Time Machine's own "Leans toward the stop" or worse),
+the line is labelled `TIME MACHINE WARNING (not a block)` and gives the
+simulated and historical average R. On the trader-broker ticket the order
+must also be the one sized from this plan (symbol, entry, setup, entry time,
+stop and target all equal the plan's; the entry is the price it was sized at),
+or the line is the unavailable message. `--timemachine PATH` reads another
+file; `--json` carries the same text under `time_machine`.
 
 ## Example: the reel
 

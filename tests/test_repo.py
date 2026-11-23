@@ -40,7 +40,10 @@ class Repo(unittest.TestCase):
 
     def test_root_matches_the_reel(self):
         root = sorted(d for d in os.listdir(ROOT) if not d.startswith(".git"))
-        self.assertEqual(root, sorted([".claude-plugin", "LICENSE", "README.md", "tests"] + SKILLS))
+        # .claude (the persistent cloud copy) and trader/ (the paper-trial config) are the
+        # cloud setup's additions on top of the reel's layout
+        self.assertEqual(root, sorted([".claude", ".claude-plugin", "LICENSE", "README.md",
+                                       "tests", "trader"] + SKILLS))
 
     def test_frontmatter_name_and_description(self):
         for s in SKILLS:
@@ -133,6 +136,47 @@ class Repo(unittest.TestCase):
             cfg = json.load(fh)
         self.assertIs(cfg["paper"], True)
         self.assertIs(cfg.get("allow_options", False), False)
+
+    def test_cloud_copy_matches_the_root_skills(self):
+        # .claude/skills/ is what a fresh Claude Code cloud session loads as /trader-*.
+        # It must stay a byte-for-byte copy of the root folders: edit one, copy to the other.
+        cloud = os.path.join(ROOT, ".claude", "skills")
+        self.assertEqual(sorted(os.listdir(cloud)), sorted(SKILLS))
+        for s in SKILLS:
+            def files(base):
+                out = {}
+                for dirpath, dirs, names in os.walk(base):
+                    dirs[:] = [d for d in dirs if d != "__pycache__"]
+                    for n in names:
+                        full = os.path.join(dirpath, n)
+                        with open(full, "rb") as fh:
+                            out[os.path.relpath(full, base)] = fh.read()
+                return out
+            self.assertEqual(files(os.path.join(ROOT, s)), files(os.path.join(cloud, s)), s)
+
+    def test_trial_config_is_a_1000_dollar_paper_account(self):
+        with open(os.path.join(ROOT, "trader", "config.json")) as fh:
+            cfg = json.load(fh)
+        self.assertEqual(cfg["budget"], 1000)
+        self.assertIs(cfg["paper"], True)
+        self.assertIs(cfg["require_stop"], True)
+        for k in ("allow_options", "allow_margin", "allow_short"):
+            self.assertIs(cfg[k], False, k)
+        # no single trade or day may risk more than a few percent of the account
+        self.assertLessEqual(cfg["max_loss_per_trade_usd"], 0.02 * cfg["budget"])
+        self.assertLessEqual(cfg["max_daily_loss_usd"], 0.05 * cfg["budget"])
+        self.assertLessEqual(cfg["max_order_usd"], cfg["budget"] * cfg["max_position_pct"] / 100.0)
+        # no email address (or any personal detail) is committed for the SEC user agent
+        self.assertNotIn("sec_user_agent", cfg)
+
+    def test_no_broker_or_order_tool_is_pre_allowed(self):
+        # the cloud setup must never pre-approve an order tool
+        for name in ("settings.json", "settings.local.json"):
+            path = os.path.join(ROOT, ".claude", name)
+            if os.path.exists(path):
+                with open(path) as fh:
+                    text = fh.read()
+                self.assertNotIn("place_stock_order", text.split('"ask"')[0] if '"ask"' in text else text)
 
 
 if __name__ == "__main__":

@@ -372,3 +372,234 @@ class WeightsMode(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------- the Time Machine note
+
+PLAN_MADE = "2026-10-19T14:15:00Z"
+TM_MADE = "2026-10-19T14:15:30Z"
+POOR = {"p_target": 0.002, "p_stop": 0.138, "r_at_target": 1.0, "avg_R": -0.065}   # target 1.4 % of one-sided
+FINE = {"p_target": 0.20, "p_stop": 0.15, "r_at_target": 1.0, "avg_R": 0.12}
+COIN = {"p_target": 0.10, "p_stop": 0.105, "r_at_target": 1.0, "avg_R": 0.0}
+
+
+def tm_doc(pl, mc=POOR, made=TM_MADE, hist=None, **over_plan):
+    saved = {k: pl.get(k) for k in size.TM_PLAN_KEYS}
+    saved.update(over_plan)
+    return {"created_by": "trader-timemachine", "created_at": made, "plan": saved, "mc": dict(mc),
+            "history": hist if hist is not None else {"triggered": 34, "avg_R": -0.269}}
+
+
+class TimeMachineNote(unittest.TestCase):
+    def go(self, tm=None, raw=None, extra=(), **plan_over):
+        """size.main in a temp folder: a plan made at 10:15, an optional saved Time Machine run."""
+        with tempfile.TemporaryDirectory() as d:
+            pl = plan(created_at=PLAN_MADE, **plan_over)
+            pp = os.path.join(d, "plan.json")
+            with open(pp, "w") as fh:
+                json.dump(pl, fh)
+            tp = os.path.join(d, "timemachine.json")
+            if raw is not None:
+                with open(tp, "w") as fh:
+                    fh.write(raw)
+            elif tm is not None:
+                with open(tp, "w") as fh:
+                    json.dump(tm(pl) if callable(tm) else tm, fh)
+            return run(["--plan", pp, "--config", CFG, "--portfolio", os.path.join(d, "none"),
+                        "--timemachine", tp, "--now", NOW] + list(extra))
+
+    def test_a_matching_poor_result_warns_without_blocking(self):
+        code, text, _ = self.go(lambda pl: tm_doc(pl))
+        self.assertEqual(code, 0)
+        self.assertIn("TIME MACHINE WARNING (not a block)", text)
+        self.assertIn("leans toward the stop", text)
+        self.assertIn("target first 0.2 % vs stop first 13.8 %", text)
+        self.assertIn("simulated average -0.065R", text)
+        self.assertIn("historical average -0.269R over 34 past sessions", text)
+        self.assertIn("trader-risk checks your rules only", text)
+        self.assertNotIn("unavailable or stale", text)
+        # the order is still proposed in full, and the warning sits with it
+        self.assertIn("Size: 8 shares of TSLA", text)
+        self.assertLess(text.index("Proposed bracket order"), text.index("TIME MACHINE WARNING"))
+
+    def test_a_matching_fair_or_coin_flip_result_is_only_informational(self):
+        for mc in (FINE, COIN):
+            code, text, _ = self.go(lambda pl, mc=mc: tm_doc(pl, mc))
+            self.assertEqual(code, 0)
+            self.assertIn("Time Machine (this exact plan):", text)
+            self.assertNotIn("WARNING", text)
+            self.assertNotIn("unavailable or stale", text)
+
+    def test_the_threshold_is_the_time_machines_own(self):
+        tm = load("trader-timemachine", "timemachine")
+        self.assertEqual(size.TM_POOR_GAP, tm.COIN_FLIP)
+        # at the Time Machine's own line the verdict leans toward the stop, so the note warns
+        mc = dict(POOR, p_target=0.09, p_stop=0.12)
+        self.assertTrue(tm.verdict(mc).startswith("Leans toward the stop"))
+        _, text, _ = self.go(lambda pl: tm_doc(pl, mc))
+        self.assertIn("WARNING", text)
+
+    def test_a_stale_or_mismatched_result_says_unavailable_and_never_warns(self):
+        cases = {
+            "other stop": lambda pl: tm_doc(pl, stop=358.00),
+            "other target": lambda pl: tm_doc(pl, target=371.00),
+            "other entry": lambda pl: tm_doc(pl, entry=365.00),
+            "other symbol": lambda pl: tm_doc(pl, symbol="NVDA"),
+            "other date": lambda pl: tm_doc(pl, date="2026-10-16"),
+            "other range": lambda pl: tm_doc(pl, opening_range={"high": 1, "low": 0, "minutes": 15}),
+            "older than the plan": lambda pl: tm_doc(pl, made="2026-10-19T14:10:00Z"),
+            "no timestamp": lambda pl: dict(tm_doc(pl), created_at=None),
+            "no mc": lambda pl: {k: v for k, v in tm_doc(pl).items() if k != "mc"},
+            "no p_stop": lambda pl: tm_doc(pl, mc={"p_target": 0.1, "avg_R": 0}),
+            "not a dict": lambda pl: [1, 2],
+        }
+        for name, tm in cases.items():
+            code, text, _ = self.go(tm)
+            self.assertEqual(code, 0, name)
+            self.assertIn("Time Machine result unavailable or stale.", text, name)
+            self.assertNotIn("WARNING", text, name)
+            self.assertIn("Size: 8 shares of TSLA", text, name)
+
+    def test_a_poor_result_for_a_plan_dated_another_day_is_stale(self):
+        # the plan itself is for 10-16 and the clock says 10-19: the budget refuses it, no note
+        code, text, _ = self.go(lambda pl: tm_doc(pl), date="2026-10-16")
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("WARNING", text)
+
+    def test_missing_or_broken_file_is_unavailable(self):
+        for kw in ({}, {"raw": "{not json"}, {"raw": ""}):
+            code, text, _ = self.go(**kw)
+            self.assertEqual(code, 0)
+            self.assertIn("Time Machine result unavailable or stale.", text)
+            self.assertNotIn("WARNING", text)
+
+    def test_a_refused_trade_has_no_note(self):
+        # a stop 64 dollars away breaks the $50 max loss for even one share: a plain refusal
+        code, text, _ = self.go(lambda pl: tm_doc(pl, stop=300.00, risk_per_share=64.18),
+                                stop=300.00, risk_per_share=64.18)
+        self.assertNotEqual(code, 0)
+        self.assertIn("No order:", text)
+        self.assertNotIn("Time Machine", text)
+        self.assertNotIn("TIME MACHINE", text)
+
+    def test_json_carries_the_same_text(self):
+        _, text, _ = self.go(lambda pl: tm_doc(pl), extra=["--json"])
+        tm = json.loads(text)["time_machine"]
+        self.assertEqual(tm["status"], "warning")
+        self.assertIn("TIME MACHINE WARNING (not a block)", tm["message"])
+        _, text, _ = self.go(extra=["--json"])
+        tm = json.loads(text)["time_machine"]
+        self.assertEqual(tm["status"], "unavailable")
+        self.assertEqual(tm["message"], "Time Machine result unavailable or stale.")
+
+    def test_the_written_order_is_the_same_with_or_without_the_result(self):
+        outs = []
+        for tm in (lambda pl: tm_doc(pl), None):
+            with tempfile.TemporaryDirectory() as d:
+                pl = plan(created_at=PLAN_MADE)
+                pp, op, tp = (os.path.join(d, n) for n in ("plan.json", "orders.json", "tm.json"))
+                dump(pp, pl)
+                if tm:
+                    dump(tp, tm(pl))
+                run(["--plan", pp, "--config", CFG, "--portfolio", os.path.join(d, "none"),
+                     "--timemachine", tp, "--now", NOW, "--write", op])
+                with open(op) as fh:
+                    outs.append(fh.read())
+        self.assertEqual(outs[0], outs[1])
+
+    def test_trader_risk_does_not_read_the_result(self):
+        with open(os.path.join(ROOT, "trader-risk", "check.py")) as fh:
+            src = fh.read().lower()
+        self.assertNotIn("timemachine", src)
+        self.assertNotIn("time machine", src)
+
+    def test_a_poor_result_leaves_the_risk_verdict_a_pass(self):
+        check = load("trader-risk", "check")
+        with tempfile.TemporaryDirectory() as d:
+            pl = plan(created_at=PLAN_MADE)
+            pp, op, tp = (os.path.join(d, n) for n in ("plan.json", "orders.json", "timemachine.json"))
+            dump(pp, pl)
+            dump(tp, tm_doc(pl))
+            run(["--plan", pp, "--config", CFG, "--portfolio", os.path.join(d, "none"),
+                 "--timemachine", tp, "--now", NOW, "--write", op])
+            cp = os.path.join(d, "config.json")
+            shutil_copy(CFG, cp)
+            verdicts = []
+            for with_tm in (True, False):
+                if not with_tm:
+                    os.remove(tp)
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    code = check.main(["--orders", op, "--config", cp, "--now", NOW, "--no-write",
+                                       "--portfolio", os.path.join(d, "none"),
+                                       "--prices", os.path.join(d, "noprices"),
+                                       "--state", os.path.join(d, "state")])
+                verdicts.append((code, out.getvalue()))
+            self.assertEqual(verdicts[0], verdicts[1])
+            self.assertEqual(verdicts[0][0], 0)
+            self.assertIn("PASS", verdicts[0][1])
+            self.assertNotIn("WARNING", verdicts[0][1])
+
+
+def shutil_copy(src, dst):
+    import shutil
+    shutil.copyfile(src, dst)
+
+
+def dump(path, doc):
+    with open(path, "w") as fh:
+        json.dump(doc, fh)
+
+
+class OrderIsForPlan(unittest.TestCase):
+    def setUp(self):
+        with open(os.path.join(FIX, "trader-risk", "orders-tsla.json")) as fh:
+            self.order = json.load(fh)["orders"][0]
+        self.plan = plan()
+
+    def ok(self, order=None, pl=None):
+        return size.order_is_for_plan(order if order is not None else self.order,
+                                      pl if pl is not None else self.plan)
+
+    def test_the_bracket_sized_from_the_plan_matches(self):
+        self.assertTrue(self.ok())
+        self.assertTrue(self.ok(dict(self.order, symbol="tsla")))                  # case does not matter
+
+    def test_any_one_field_different_breaks_the_match(self):
+        changes = {
+            "symbol": lambda o, p: o.update(symbol="NVDA"),
+            "side": lambda o, p: o.update(side="sell"),
+            "order stop": lambda o, p: o.update(stop_loss_stop_price="358.00"),
+            "order target": lambda o, p: o.update(take_profit_limit_price="371.00"),
+            "embedded stop": lambda o, p: o["plan"].update(stop=358.00),
+            "embedded target": lambda o, p: o["plan"].update(target=371.00),
+            "entry (embedded)": lambda o, p: o["plan"].update(entry=365.00),
+            "entry (plan)": lambda o, p: p.update(entry=365.00),
+            "setup": lambda o, p: o["plan"].update(setup="flag"),
+            "entry time": lambda o, p: o["plan"].update(entry_time="10:20 AM"),
+            "plan stop": lambda o, p: p.update(stop=358.00),
+            "plan target": lambda o, p: p.update(target=371.00),
+            "no embedded plan": lambda o, p: o.pop("plan"),
+            "embedded plan not a dict": lambda o, p: o.update(plan="x"),
+            "no plan symbol": lambda o, p: p.pop("symbol"),
+        }
+        for name, change in changes.items():
+            order = json.loads(json.dumps(self.order))
+            pl = dict(self.plan)
+            change(order, pl)
+            self.assertFalse(size.order_is_for_plan(order, pl), name)
+
+    def test_bad_inputs_are_false_not_errors(self):
+        for o, p in ((None, self.plan), (self.order, None), ("x", "y"), ({}, {}),
+                     (dict(self.order, stop_loss_stop_price="abc"), self.plan)):
+            self.assertFalse(size.order_is_for_plan(o, p))
+
+    def test_cent_rounding_not_float_noise(self):
+        order = json.loads(json.dumps(self.order))
+        order["plan"]["entry"] = 364.1800000001
+        self.assertTrue(self.ok(order))
+
+    def test_the_budget_own_order_always_matches_its_plan(self):
+        # what size.py writes must pass its own check, or the ticket would never show a result
+        s = size.size_trade(self.plan, cfg(), None, None, None, None, TODAY)
+        self.assertTrue(self.ok(size.bracket_order(s)))

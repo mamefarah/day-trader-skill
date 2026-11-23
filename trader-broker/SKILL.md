@@ -140,7 +140,19 @@ that draft orders to Needs approval too.
 1. `ticket.py show`. Only READY tickets go to the user. A ticket that is NOT
    READY or BLOCKED goes back to `/trader-risk`.
 2. Show ONE ticket and ask: "Place this order? Reply yes or no." One order
-   per question. Never offer "yes to all".
+   per question. Never offer "yes to all". Show the ticket's Time Machine
+   line with it, word for word. It is informational only: it is not part of
+   the order, not a gate, and it never changes whether a yes is accepted.
+   `TIME MACHINE WARNING (not a block)` means trader-timemachine's saved
+   run for this exact plan leans toward the stop; `Time Machine result
+   unavailable or stale.` means there is no run for this exact plan, today, or the
+   order on the ticket is not the one sized from that plan (symbol, entry,
+   setup, entry time, stop and target must all match).
+   An exit ticket (a sell that closes a position) carries no such line.
+   The text comes from trader-budget's `size.py`, the same function its own
+   summary uses, so the two cannot disagree (`show` reads `trader/plan.json`
+   and `trader/timemachine.json`; `--plan` and `--timemachine` point
+   elsewhere; `--json` carries it under `time_machine`).
 3. Run `ticket.py approve --index N --reply "<the user's reply, word for word>"`.
    If it prints "Not recorded", the reply was not an explicit yes for this
    order (for example "sure", "yes to all", or a yes that names a different
