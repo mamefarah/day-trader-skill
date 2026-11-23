@@ -85,6 +85,19 @@ DEFAULTS = {
 }
 EPS = 1e-9
 FRESH_MINUTES = 15
+
+# The Time Machine note on the proposed order. It informs, it never blocks: trader-risk
+# does not read it and its PASS stays a rules check. "Poor" is the Time Machine's own
+# "Leans toward the stop" line or worse: the target's share of the replays that hit one
+# side is at least TM_POOR_GAP under the share that breaks even at the plan's R
+# (trader-timemachine's COIN_FLIP, 5 points; a test keeps the two equal).
+TM_PATH = "trader/timemachine.json"
+TM_POOR_GAP = 0.05
+TM_UNAVAILABLE = "Time Machine result unavailable or stale."
+# the plan fields the saved run must repeat exactly (trader-exit's trader/plan.json)
+TM_PLAN_KEYS = ("symbol", "side", "date", "setup", "entry", "entry_time", "entry_bar", "stop",
+                "target", "risk_per_share", "target_r", "opening_range", "stop_rule", "interval",
+                "flat_by")
 SETUP_WORDS = {"orb": "opening-range breakout", "flag": "flag", "bounce": "oversold bounce"}
 
 
@@ -441,7 +454,47 @@ def bracket_order(s):
     return o
 
 
-def plan_report(s, order, notes=()):
+def time_machine_note(plan, doc, today):
+    """(status, lines) for the proposed-order summary. status is "unavailable", "ok" or
+    "warning". A saved Time Machine run counts only when it was made for this exact plan
+    (every field in TM_PLAN_KEYS equal, same symbol and date as today) and not before the
+    plan was written; anything else, or any malformed file, is "unavailable or stale"."""
+    stale = ("unavailable", [TM_UNAVAILABLE])
+    try:
+        if not isinstance(plan, dict) or not isinstance(doc, dict):
+            return stale
+        saved, mc = doc.get("plan"), doc.get("mc")
+        if not isinstance(saved, dict) or not isinstance(mc, dict):
+            return stale
+        if str(plan.get("date") or "") != today or not plan.get("symbol"):
+            return stale
+        if any(k not in plan or saved.get(k) != plan.get(k) for k in TM_PLAN_KEYS):
+            return stale
+        made, written = parse_utc(doc.get("created_at")), parse_utc(plan.get("created_at"))
+        if made is None or written is None or made < written:
+            return stale
+        pt, ps, avg = _f(mc.get("p_target")), _f(mc.get("p_stop")), _f(mc.get("avg_R"))
+        r = _f(mc.get("r_at_target")) or 1.0
+        if pt is None or ps is None or avg is None or pt < 0 or ps < 0:
+            return stale
+    except (TypeError, ValueError):
+        return stale
+    odds = "target first %.1f %% vs stop first %.1f %%; simulated average %+.3fR" % (100 * pt, 100 * ps, avg)
+    hist = doc.get("history")
+    hist_avg = _f(hist.get("avg_R")) if isinstance(hist, dict) else None
+    if hist_avg is not None:
+        n = hist.get("triggered")
+        odds += "; historical average %+.3fR%s" % (hist_avg, (" over %d past sessions" % n)
+                                                 if isinstance(n, int) and n > 0 else "")
+    gap = (pt / (pt + ps) - 1.0 / (1.0 + r)) if pt + ps > 0 else 0.0
+    if gap <= -TM_POOR_GAP:
+        return "warning", ["TIME MACHINE WARNING (not a block): the replay of this exact plan leans "
+                           "toward the stop: %s." % odds,
+                           "  trader-risk checks your rules only; a PASS does not mean the odds are good."]
+    return "ok", ["Time Machine (this exact plan): %s." % odds]
+
+
+def plan_report(s, order, notes=(), tm_lines=()):
     lines = []
     setup = SETUP_WORDS.get(s["setup"], s["setup"] or "setup")
     lines.append("%s buy, %s, entry %s%s" % (s["symbol"], setup, _price(s["entry_plan"]),
@@ -476,6 +529,8 @@ def plan_report(s, order, notes=()):
     lines.append("  buy %s %s, %s, day, take-profit %s, stop-loss %s"
                  % (order["qty"], order["symbol"], how, order["take_profit_limit_price"],
                     order["stop_loss_stop_price"]))
+    for l in tm_lines:
+        lines.append(l)
     if s["flat_by"]:
         lines.append("Flat by %s New York: anything still open then gets closed (trader-alerts rings, "
                      "trader-broker flatten)." % s["flat_by"])
@@ -809,10 +864,21 @@ def run_plan(a, cfg):
     if order and a.write:
         src = "trader/plan.json (%s %s %s)" % (s["symbol"], s["setup"] or "plan", s["date"] or today)
         write_orders(a.write, [order], cfg, src, now)
+    tm_status, tm_lines = "unavailable", [TM_UNAVAILABLE]
+    if order:
+        tm_doc = None
+        if os.path.exists(a.timemachine):
+            try:
+                tm_doc = read_json(a.timemachine, "time machine")
+            except SizeError:
+                tm_doc = None
+        tm_status, tm_lines = time_machine_note(plan, tm_doc, today)
     if a.json:
-        print(json.dumps({"sizing": s, "orders": [order] if order else [], "notes": notes}, indent=2))
+        print(json.dumps({"sizing": s, "orders": [order] if order else [], "notes": notes,
+                          "time_machine": {"status": tm_status, "message": " ".join(
+                              l.strip() for l in tm_lines)}}, indent=2))
     else:
-        print(plan_report(s, order, notes))
+        print(plan_report(s, order, notes, tm_lines if order else ()))
         if order and a.write:
             print("Wrote 1 proposed bracket order to %s" % a.write)
     return 0 if order else 1
@@ -852,6 +918,8 @@ def main(argv=None):
     ap.add_argument("--limit", nargs="?", const="plan", metavar="PRICE",
                     help="a limit order instead of market, at the plan's entry or at PRICE")
     ap.add_argument("--prices", help="prices JSON (default trader/prices.json if it exists)")
+    ap.add_argument("--timemachine", default=TM_PATH,
+                    help="saved trader-timemachine run for the warning (default %s)" % TM_PATH)
     ap.add_argument("--portfolio", default="trader/portfolio.json",
                     help="your account; its cash caps the size if it exists")
     ap.add_argument("--now", help="pretend it is this New York time, e.g. \"2026-10-19 10:15\"")
