@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+
+# Working files the trader-* skills write at run time (plans, orders, quotes,
+# broker log, risk verdicts, saved PDFs). Only the paper-trial config is tracked.
+trader/*
+!trader/config.json

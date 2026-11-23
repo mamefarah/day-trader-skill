@@ -57,6 +57,32 @@ The tools need Python 3.8 or newer. Nothing to pip install. The SEC tools
 email in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`)
 or in the `SEC_USER_AGENT` environment variable.
 
+## Claude Code cloud setup (this fork)
+
+The eleven skills are also committed under `.claude/skills/`, so a fresh Claude Code
+cloud session loads `/trader-scanner` and the rest from the repository with nothing
+installed in `~/.claude/skills/`. The root `trader-*` folders stay as upstream has them
+(the plugin manifest and the tests read them), so `.claude/skills/` is a byte-for-byte
+copy, and a test fails if the two drift. After editing a skill, copy it across:
+
+```bash
+rsync -a --delete --exclude __pycache__ trader-scanner/ .claude/skills/trader-scanner/
+```
+
+`trader/config.json` is the trial's rules: a $1,000 account, **paper only**, $10 max loss
+per trade, $30 max loss per day, whole shares, no options, margin or shorting. These
+limits are this fork's choice, not the upstream defaults ($5,000 and $50); change them
+deliberately. Everything else the skills write to `trader/` is ignored by git. No broker
+is connected and no order tool is pre-approved. `sec_user_agent` is left out on purpose:
+`/trader-news` and `/trader-analyst` skip SEC calls until you set `SEC_USER_AGENT`
+(your name and email) in the environment.
+
+The tools need these hosts. A cloud environment with a restricted network blocks them
+until they are allowed: `query1.finance.yahoo.com`, `query2.finance.yahoo.com`,
+`feeds.finance.yahoo.com`, `www.nasdaqtrader.com`, `www.sec.gov`, `data.sec.gov`,
+`disclosures-clerk.house.gov` (and `stooq.com`, which the alerts skill falls back to).
+The offline tests and the `--offline` fixtures need none of them.
+
 ## The eleven
 
 | command | job | what it does |
